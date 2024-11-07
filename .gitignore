@@ -2,6 +2,16 @@
 cache/
 out/
 
+# Forge test cache
+forge-test-cache/
+
+# Common directories for dependency libraries
+lib/
+lib/forge-std/
+
+# VSCode settings
+.vscode/
+
 # Ignores development broadcast logs
 !/broadcast
 /broadcast/*/31337/
