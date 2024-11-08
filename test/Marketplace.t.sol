@@ -45,7 +45,7 @@ contract DeployAndUpgradeTest is Test {
     function testMarketplaceWorks() public view {
         uint8 expectedCounter = 0;
 
-        assertEq(expectedCounter, marketplace.getProviderCounter());
+        assertEq(expectedCounter, marketplace.providersId());
     }
 
     function testRemoveTokenDecimals() public view {
@@ -59,10 +59,10 @@ contract DeployAndUpgradeTest is Test {
         bytes32 key = "test";
         uint256 providerFee = 100 * 10 ** 18; // 100 LINK
         uint8 expectedCounter = 0;
-        assertEq(expectedCounter, marketplace.getProviderCounter());
+        assertEq(expectedCounter, marketplace.providersId());
         marketplace.registerProvider(key, providerFee);
 
-        assertEq(1, marketplace.getProviderCounter());
+        assertEq(1, marketplace.providersId());
 
         uint8 expectedId = marketplace.keyToProviderId(key);
         assertEq(expectedId, 1);
@@ -91,10 +91,10 @@ contract DeployAndUpgradeTest is Test {
         bytes32 key = "test";
         uint256 providerFee = 100 * 10 ** 18; // 100 LINK
         uint8 expectedCounter = 0;
-        assertEq(expectedCounter, marketplace.getProviderCounter());
+        assertEq(expectedCounter, marketplace.providersId());
         marketplace.registerProvider(key, providerFee);
 
-        assertEq(1, marketplace.getProviderCounter());
+        assertEq(1, marketplace.providersId());
 
         uint8 expectedId = marketplace.keyToProviderId(key);
         assertEq(expectedId, 1);

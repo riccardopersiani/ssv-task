@@ -48,6 +48,7 @@ contract Marketplace is Initializable, OwnableUpgradeable, UUPSUpgradeable {
         uint8 id; // 1 byte
         bool isActive; // 1 byte
         address owner; // 20 bytes
+            // TODO: FROM THE SPECS Each Provider has its list of Subscribers. // maybe remove the subscriberNumber variable if this is added
     }
 
     // NOTE: GAS OPTIMIZATION! Same for above
@@ -57,6 +58,7 @@ contract Marketplace is Initializable, OwnableUpgradeable, UUPSUpgradeable {
         bool isPaused; // 1 byte
         uint64 id; // 8 bytes
         address owner; // 20 bytes
+        string plan; // Depends on the length of the string
     }
 
     // NOTE: Serves 2 puposes, check that the sender is the owner of the provider and that the provider exists
@@ -76,6 +78,10 @@ contract Marketplace is Initializable, OwnableUpgradeable, UUPSUpgradeable {
     constructor() {
         _disableInitializers();
     }
+
+    // NOTE ON AUTHORIZATION: A good approach to evaluate regarding the authorization would have been a Role-Based Access Control (RBAC) system.
+    // Roles: Owner, Provider, Subscriber. Roles that could have been granted or revoked depending from the mechanics. 
+    // For the sake of KISS approach, decided to not use a RBAC system.
 
     /// @notice Initialize the contract
     /// @param _owner The owner of the contract
@@ -99,6 +105,7 @@ contract Marketplace is Initializable, OwnableUpgradeable, UUPSUpgradeable {
     }
 
     /// @notice Locks the contract to prevent further upgrades permanently
+    /// FROM THE SPECS: Allow the contract to be upgradeable, with the possibility of making it non-upgradeable in the future.
     function lockUpgradeability() external onlyOwner {
         isUpgradable = false;
     }
@@ -127,27 +134,28 @@ contract Marketplace is Initializable, OwnableUpgradeable, UUPSUpgradeable {
 
         // If pre-validation checks have passed, we can proceed with the registration
         Provider storage provider = providers[providersId];
-        provider.balance = 0;
+        provider.balance = 0; // FROM THE SPECS:  Both Providers and Subscribers have their balances maintained within the contract.
         provider.earnings = 0;
         provider.owner = msg.sender;
         provider.id = providersId;
-        provider.isActive = true;
+        provider.isActive = true; // FROM THE SPECS: Additionally, a Provider can be in one of two states: active or inactive, depending on whether it can provide services.
         provider.fee = fee;
         provider.subscribersNumber = 0;
         // Starts the 30 days countdown for withdrawing the earnings
         provider.lastWithdrawTime = block.timestamp;
+        // todo: need to add a list of its subscribers
 
         // Once the provider is registered, we can store the key and the id, so that the key cannot be used anymore!
         // FROM THE EMAIL: the verification of their uniqueness is done on the contract side.
         keyToProviderId[key] = providersId;
     }
 
-    // FROM THE EMAIL: On the second question, this is up to your implementation. 
+    // FROM THE EMAIL: On the second question, this is up to your implementation.
     // An inactive provider doesn't provide services (like pausing it) but can resume operations later. A removed provider can not be reactivated later.
-    
-    // JUSTIFYING THE CHOSEN APPROACH: both approaches have pros and cons; not deleting providers means that more storage is gonna be used; 
+
+    // JUSTIFYING THE CHOSEN APPROACH: both approaches have pros and cons; not deleting providers means that more storage is gonna be used;
     // however, re-activating an inactive provider is a cheaper and more appealing feature to offer than create-delete-recreate a Provider.
-    // Also deleting could led to loss of earnings not withdrawn. 
+    // Also deleting could led to loss of earnings not withdrawn.
 
     /// @notice Remove a provider from the marketplace and transfer the remaining balance to the owner
     /// FROM THE SPECS: Providers can be removed from the system, but only by their respective owners.
@@ -163,48 +171,95 @@ contract Marketplace is Initializable, OwnableUpgradeable, UUPSUpgradeable {
 
     // GAS OPTIMIZATION: using calldata for the dynamic array
     /// @notice Register a new subscriber
-    /// @param providersIds The ids of the providers the subscriber wants to subscribe to
+    /// @param providersIds The ids of the providers the subscriber wants to subscribe to. FROM THE SPECS: Subscribers can register with one or more active Providers.
     /// @param depositAmount The amount of tokens to be deposited to the subscription
     function registerSubscriber(uint8[] memory providersIds, uint256 depositAmount) external {
         require(providersIds.length < MAX_PROVIDERS, "Cannot register to more than available");
+        // FROM THE SPECS: The system should check that the minimum deposit amount is worth at least $100 based on the current token price from Chainlink.
+        // TODO: Adjust the proper units dealing with decimals
         require(
             removeTokenDecimals(depositAmount) * uint256(fetchTokenPriceFromChainlink()) > 100,
             "Initial deposit too low"
         );
 
+        // The subscription owners pays for at least 2 months of the minimum fee ($100 total)
         officialToken.transferFrom(msg.sender, address(this), depositAmount);
 
+        // Increment the subscriber id / counter; the first subscriber will have id 1
         subscribersId++;
 
+        // If pre-validation checks have passed, we can proceed with the registration
         Subscriber storage subscriber = subscribers[subscribersId];
         subscriber.id = subscribersId;
-        subscriber.balance = depositAmount;
+        subscriber.balance = depositAmount; // FROM THE SPECS:  Both Providers and Subscribers have their balances maintained within the contract.
         subscriber.owner = msg.sender;
         subscriber.isPaused = false;
-        subscriber.subscribedProviders = providersIds;
+        subscriber.subscribedProviders = providersIds; // FROM THE SPECS: A Subscribed should use a certain number of Providers.
+        subscriber.plan = "basic";
 
+        // Increment the subscribers number for each provider subscribed
         for (uint8 i = 0; i < providersIds.length; i++) {
             providers[providersIds[i]].subscribersNumber++;
+            //TODO: save the actual subscriber id in the new array in the provider struct
         }
-
-        // todo: could
     }
 
+    /// @notice FROM THE SPECS: Subscribers can incresse the balance of subscriptions by transferring funds to the contract.
+    /// NOTE: decided not to put a modifier so that it is possible to fund any existent subscription ( and even if paused ).
+    function depositToSubscription(uint64 id, uint256 amount) external {
+        officialToken.transferFrom(msg.sender, address(this), amount);
+        subscribers[id].balance += amount;
+    }
+
+    // NOTE: Ideally there would be mechanics to remove balance from the subscription, maybe only if it has been paused for a while, and if the subscriber wants to leave the service and is entitled to a refund.
+
+    /// @notice Withdraw the provider funds into the balance, then the owners can move them out of the contract as they wish
+    // obviously there would need to be a proper function to move also the balance of the owner our the contract
+    function withdrawProviderEarnings(uint8 id) external onlyProviderOwner(id) {
+        // Check if a month has passed since the last withdrawal
+        // FROM THE SPECS: The calculation is made every month.
+        require(block.timestamp >= providers[id].lastWithdrawTime + 30 days, "Withdrawal is monthly limited");
+        // perform the earnings calculation if the month has passed since the last withdrawal
+        // FROM THE SPECS:  Providers can withdraw their earnings from the contract, which are calculated based on their subscriber count and the fees they charge.
+        // TODO instead of the subscriberNumber use the length of the new array of subscribers in the provider struct
+        // TODO: here obviously the math and the fee has to be double checked and adjusted
+        uint256 amount = providers[id].subscribersNumber * providers[id].fee;
+
+        // TODO: ideally here the paused subscribers should not be counted!!! However some smart subscribers could pause the day before the withdrawal or more efficiently front-run the withdrawal and appear as paused and not pay the fee
+        require(amount > 0, "Insufficient funds to withdraw");
+
+        // Transfer the earnings to the provider
+        // NOTE: we could transfer the funds to the provider owner already but at that point the balance field would make no sense: `officialToken.transferFrom(msg.sender, address(this), amount);` Done in a separate function
+        providers[id].balance += amount;
+        providers[id].earnings += amount;
+
+        // TODO: adjust the proper units dealing with decimals
+        uint256 usdEquivalent = amount * uint256(fetchTokenPriceFromChainlink());
+        // FROM THE SPECS: When withdrawing, emit an event that includes both the token amount withdrawn and its USD equivalent.
+        // This emit can be checked on the test side if done properly
+        emit Withdrawal(msg.sender, amount, usdEquivalent);
+    }
+
+    function transferToOwner(uint8 id) external onlyProviderOwner(id) {
+        uint256 amount = providers[id].balance;
+        require(amount > 0, "No funds to transfer");
+        providers[id].balance = 0;
+        officialToken.transfer(msg.sender, amount);
+    }
+
+    /// @notice FROM THE SPECS: The state of the Providers (active or inactive) can be updated. Only the contract owner can call this function.
     function changeProviderState(uint8 id, bool newState) external onlyOwner {
         providers[id].isActive = newState;
     }
 
-
-
-    
-
+    /// @notice FROM THE SPECS: Get the state of a provider by id: returns number of subscribers, fee, owner, balance, and state.
     function getProviderState(uint8 id)
         public
         view
         returns (uint64 subscribersNumber, uint256 fee, address owner, uint256 balance, bool isActive)
     {
         return (
-            providers[id].subscribersNumber,
+            providers[id].subscribersNumber, // TODO update to array length of subscribers
             providers[id].fee,
             providers[id].owner,
             providers[id].balance,
@@ -212,8 +267,26 @@ contract Marketplace is Initializable, OwnableUpgradeable, UUPSUpgradeable {
         );
     }
 
-    function getProviderCounter() public view returns (uint8) {
-        return providersId;
+    /// @notice FROM THE SPECS: Get the provider earnings by id.
+    function getProviderEarnings(uint8 id) public view returns (uint256) {
+        return providers[id].earnings;
+    }
+
+    /// @notice FROM THE SPECS: Get the state of a provider by id: returns number of subscribers, fee, owner, balance, and state.
+    function getSubscriberState(uint64 id)
+        public
+        view
+        returns (address owner, uint256 balance, string memory plan, bool isPaused)
+    {
+        return (subscribers[id].owner, subscribers[id].balance, subscribers[id].plan, subscribers[id].isPaused);
+    }
+
+    /// @notice FROM THE SPECS: Implement a function getSubscriberDepositValueUSD(uint256 subscriberId)
+    /// that returns the current USD value of a subscriber's deposit based on the
+    /// latest Chainlink price data.
+    function getSubscriberDepositValueUSD(uint64 id) external view returns (uint256) {
+        return subscribers[id].balance * uint256(fetchTokenPriceFromChainlink());
+        // todo get subscriber deposit value in USD
     }
 
     /// @notice Get the provider status
@@ -226,27 +299,6 @@ contract Marketplace is Initializable, OwnableUpgradeable, UUPSUpgradeable {
     /// @param id The id of the subscriber
     function isSubscriberPaused(uint64 id) public view returns (bool) {
         return subscribers[id].isPaused;
-    }
-
-    /// @notice Withdraw the provider funds into the balance, then the owners can move them out of the contract as they wish
-    // obviously there would need to be a proper function to move also the balance of the owner our the contract
-    function withdrawProviderFunds(uint8 id) external onlyProviderOwner(id) {
-        // Check if a month has passed since the last withdrawal
-        require(block.timestamp >= providers[id].lastWithdrawTime + 30 days, "Withdrawal is monthly limited");
-        // perform the earnings calculation if the month has passed since the last withdrawal
-        uint256 amount = providers[id].subscribersNumber * providers[id].fee;
-
-        require(amount > 0, "Insufficient funds to withdraw");
-
-        // TODO: adjust the proper units dealing with decimals
-        uint256 usdEquivalent = amount * uint256(fetchTokenPriceFromChainlink());
-        emit Withdrawal(msg.sender, amount, usdEquivalent);
-    }
-
-    // NOTE: decided not to put a modifier so that you can find any existent subscription ( and even if paused )
-    function depositToSubscription(uint64 id, uint256 amount) external {
-        officialToken.transferFrom(msg.sender, address(this), amount);
-        subscribers[id].balance += amount;
     }
 
     /// CAUTION: this function is not safe as it is, it should have more checks over decimals and over stale price data!
@@ -265,10 +317,6 @@ contract Marketplace is Initializable, OwnableUpgradeable, UUPSUpgradeable {
     // Assuming for simplicity that token decimals are 18, obviously this is not always the case
     function removeTokenDecimals(uint256 amount) public pure returns (uint256) {
         return amount / (10 ** 18);
-    }
-
-    function getSubscriberDepositValueUSD(uint256 subscriberId) external view returns (uint256) {
-        // todo get subscriber deposit value in USD
     }
 
     // TODO
