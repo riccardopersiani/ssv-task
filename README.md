@@ -2,8 +2,6 @@
 
 # Bonus Section 
 
-
-
 ## Balance Management:
 
 Currently, the contract operates monthly, meaning that
