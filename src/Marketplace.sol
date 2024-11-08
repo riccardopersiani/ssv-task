@@ -44,11 +44,10 @@ contract Marketplace is Initializable, OwnableUpgradeable, UUPSUpgradeable {
         uint256 earnings; // 32 bytes
         uint256 lastWithdrawTime; // Last time the provider withdrew
         uint256 fee; // 32 bytes
-        uint64 subscribersNumber; // could reduce to 128 // we don't need the subscriber ids, just the number of subscribers, otherwise a big array here could be too expensive and redundant // i need this data just to calculate the due amount
         uint8 id; // 1 byte
         bool isActive; // 1 byte
         address owner; // 20 bytes
-            // TODO: FROM THE SPECS Each Provider has its list of Subscribers. // maybe remove the subscriberNumber variable if this is added
+        uint64[] subscribers; // unknown FROM THE SPECS: Each Provider has its list of Subscribers.
     }
 
     // NOTE: GAS OPTIMIZATION! Same for above
@@ -58,7 +57,7 @@ contract Marketplace is Initializable, OwnableUpgradeable, UUPSUpgradeable {
         bool isPaused; // 1 byte
         uint64 id; // 8 bytes
         address owner; // 20 bytes
-        string plan; // Depends on the length of the string
+        string plan; // Depends on the length of the string // Could have been an enum or something more complex with associated a different fee/cost.
     }
 
     // NOTE: Serves 2 puposes, check that the sender is the owner of the provider and that the provider exists
@@ -80,7 +79,7 @@ contract Marketplace is Initializable, OwnableUpgradeable, UUPSUpgradeable {
     }
 
     // NOTE ON AUTHORIZATION: A good approach to evaluate regarding the authorization would have been a Role-Based Access Control (RBAC) system.
-    // Roles: Owner, Provider, Subscriber. Roles that could have been granted or revoked depending from the mechanics. 
+    // Roles: Owner, Provider, Subscriber. Roles that could have been granted or revoked depending from the mechanics.
     // For the sake of KISS approach, decided to not use a RBAC system.
 
     /// @notice Initialize the contract
@@ -112,7 +111,7 @@ contract Marketplace is Initializable, OwnableUpgradeable, UUPSUpgradeable {
 
     /// @dev Authorize an upgrade if the contract is upgradeable
     /// @param newImplementation The address of the new contract implementation
-    function _authorizeUpgrade(address newImplementation) internal override onlyOwner {
+    function _authorizeUpgrade(address newImplementation) internal view override onlyOwner {
         require(isUpgradable, "Contract is locked and cannot be upgraded");
     }
 
@@ -140,10 +139,10 @@ contract Marketplace is Initializable, OwnableUpgradeable, UUPSUpgradeable {
         provider.id = providersId;
         provider.isActive = true; // FROM THE SPECS: Additionally, a Provider can be in one of two states: active or inactive, depending on whether it can provide services.
         provider.fee = fee;
-        provider.subscribersNumber = 0;
         // Starts the 30 days countdown for withdrawing the earnings
         provider.lastWithdrawTime = block.timestamp;
         // todo: need to add a list of its subscribers
+        provider.subscribers = new uint64[](0);
 
         // Once the provider is registered, we can store the key and the id, so that the key cannot be used anymore!
         // FROM THE EMAIL: the verification of their uniqueness is done on the contract side.
@@ -199,8 +198,7 @@ contract Marketplace is Initializable, OwnableUpgradeable, UUPSUpgradeable {
 
         // Increment the subscribers number for each provider subscribed
         for (uint8 i = 0; i < providersIds.length; i++) {
-            providers[providersIds[i]].subscribersNumber++;
-            //TODO: save the actual subscriber id in the new array in the provider struct
+            providers[providersIds[i]].subscribers.push(subscribersId);
         }
     }
 
@@ -221,17 +219,25 @@ contract Marketplace is Initializable, OwnableUpgradeable, UUPSUpgradeable {
         require(block.timestamp >= providers[id].lastWithdrawTime + 30 days, "Withdrawal is monthly limited");
         // perform the earnings calculation if the month has passed since the last withdrawal
         // FROM THE SPECS:  Providers can withdraw their earnings from the contract, which are calculated based on their subscriber count and the fees they charge.
-        // TODO instead of the subscriberNumber use the length of the new array of subscribers in the provider struct
         // TODO: here obviously the math and the fee has to be double checked and adjusted
-        uint256 amount = providers[id].subscribersNumber * providers[id].fee;
+        // TODO: ideally from the specs here the paused subscribers should not be counted, however there is a vulnerability some smart subscribers could pause the day before the withdrawal or more efficiently front-run the withdrawal and appear as paused and not pay the fee!
+        // Needs more complex logic.
+        uint256 amount = providers[id].subscribers.length * providers[id].fee;
 
-        // TODO: ideally here the paused subscribers should not be counted!!! However some smart subscribers could pause the day before the withdrawal or more efficiently front-run the withdrawal and appear as paused and not pay the fee
         require(amount > 0, "Insufficient funds to withdraw");
 
         // Transfer the earnings to the provider
         // NOTE: we could transfer the funds to the provider owner already but at that point the balance field would make no sense: `officialToken.transferFrom(msg.sender, address(this), amount);` Done in a separate function
         providers[id].balance += amount;
         providers[id].earnings += amount;
+
+        // Update the last withdrawal time
+        providers[id].lastWithdrawTime = block.timestamp;
+
+        // MONTLY FEE PAYMENT: the fee is paid by the provider to the contract
+        // here you can loop over the subscribers and make them transfer the funds to the contract
+        // also it should be checked that the subscriber always need to have the fee or it should be paused
+        // also check that the transfered amount from the subscribers matches the amount credited to the provider
 
         // TODO: adjust the proper units dealing with decimals
         uint256 usdEquivalent = amount * uint256(fetchTokenPriceFromChainlink());
@@ -256,10 +262,10 @@ contract Marketplace is Initializable, OwnableUpgradeable, UUPSUpgradeable {
     function getProviderState(uint8 id)
         public
         view
-        returns (uint64 subscribersNumber, uint256 fee, address owner, uint256 balance, bool isActive)
+        returns (uint256 subscribersNumber, uint256 fee, address owner, uint256 balance, bool isActive)
     {
         return (
-            providers[id].subscribersNumber, // TODO update to array length of subscribers
+            providers[id].subscribers.length,
             providers[id].fee,
             providers[id].owner,
             providers[id].balance,
@@ -315,16 +321,11 @@ contract Marketplace is Initializable, OwnableUpgradeable, UUPSUpgradeable {
     // GAS OPTIMIZATION: using pure for this helper
     // Ideally should be restircted to internal, but for testing purposes, it is public
     // Assuming for simplicity that token decimals are 18, obviously this is not always the case
+    /// @notice Remove all the token decimals for the calculations is not ideal, better to keep at least 2 decimals for the calculations
     function removeTokenDecimals(uint256 amount) public pure returns (uint256) {
         return amount / (10 ** 18);
     }
 
     // TODO
-    // there needs to be a method for the provider to transfer the balance out of the contract
-    // officialToken.approve(msg.sender, amount); //todo: fix, this needs to approve the sender to move tokens from this contract
-    // officialToken.transfer(msg.sender, amount);
-    // providers[id].balance -= amount;
-
-    // TODO
-    // subscribers could cheat and pause before they have to pay the subscripion
+    // function that allows subscribers to pause.
 }
